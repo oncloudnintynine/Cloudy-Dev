@@ -1,0 +1,432 @@
+// ==========================================
+// Code.js - Main Router & DB Setup 
+// ==========================================
+
+function putCachedData(key, data, expirationInSeconds) {
+try {
+var cache = CacheService.getScriptCache();
+var json = JSON.stringify(data);
+var chunkSize = 90000; // 90KB chunking to bypass Google's 100KB limit
+var chunks = Math.ceil(json.length / chunkSize);
+var dataObj = { chunks: chunks };
+cache.put(key, JSON.stringify(dataObj), expirationInSeconds);
+for (var i = 0; i < chunks; i++) {
+cache.put(key + "_" + i, json.substring(i * chunkSize, (i + 1) * chunkSize), expirationInSeconds);
+}
+} catch (e) {
+console.error("Cache put error", e);
+}
+}
+
+function getCachedData(key) {
+try {
+var cache = CacheService.getScriptCache();
+var metaStr = cache.get(key);
+if (!metaStr) return null;
+var meta = JSON.parse(metaStr);
+var chunks = meta.chunks;
+var json = "";
+for (var i = 0; i < chunks; i++) {
+var chunk = cache.get(key + "_" + i);
+if (!chunk) return null;
+json += chunk;
+}
+return JSON.parse(json);
+} catch (e) {
+console.error("Cache get error", e);
+return null;
+}
+}
+
+function removeCachedData(key) {
+try {
+var cache = CacheService.getScriptCache();
+var metaStr = cache.get(key);
+if (metaStr) {
+try {
+ var meta = JSON.parse(metaStr);
+ var chunks = meta.chunks;
+ for (var i = 0; i < chunks; i++) {
+   cache.remove(key + "_" + i);
+ }
+} catch(e){}
+}
+cache.remove(key);
+} catch (e) {}
+}
+
+function syncExternalCalendarsBackground() {
+syncExternalCalendars();
+}
+
+function ensureGcalSyncTrigger() {
+try {
+var triggers = ScriptApp.getProjectTriggers();
+var exists = false;
+for (var i = 0; i < triggers.length; i++) {
+if (triggers[i].getHandlerFunction() === 'syncExternalCalendarsBackground') {
+ exists = true;
+ break;
+}
+}
+if (!exists) {
+ScriptApp.newTrigger('syncExternalCalendarsBackground')
+ .timeBased()
+ .everyMinutes(15)
+ .create();
+}
+} catch(e) {
+console.error("Failed to create trigger: " + e.message);
+}
+}
+
+function syncExternalCalendars() {
+var props = PropertiesService.getScriptProperties();
+var gcalSyncCalendars = JSON.parse(props.getProperty('gcalSyncCalendars') || "[]");
+var result = [];
+
+if (gcalSyncCalendars.length > 0) {
+var todayStart = new Date();
+todayStart.setHours(0,0,0,0);
+var futureDate = new Date(todayStart.getTime() + (365 * 24 * 60 * 60 * 1000));
+var pastDate = new Date(todayStart.getTime() - (14 * 24 * 60 * 60 * 1000));
+
+gcalSyncCalendars.forEach(function(calName) {
+try {
+  var extCals = CalendarApp.getCalendarsByName(calName);
+  if (extCals.length > 0) {
+      var syncCal = extCals[0];
+      var syncCalId = syncCal.getId();
+      var extEvents = syncCal.getEvents(pastDate, futureDate);
+      
+      extEvents.forEach(function(extEvt) {
+          var evtId = extEvt.getId();
+          var isAllDay = extEvt.isAllDayEvent();
+          var sDate = extEvt.getStartTime();
+          var eDate = extEvt.getEndTime();
+          
+          if (isAllDay) {
+              // GCal natively returns the end date as midnight of the *following* day.
+              // Subtracting exactly 24 hours locks it to the correct inclusive boundary.
+              eDate = new Date(eDate.getTime() - (24 * 60 * 60 * 1000));
+              if (eDate.getTime() < sDate.getTime()) {
+                  eDate = new Date(sDate.getTime());
+              }
+          }
+          
+          result.push({
+              ID: 'EXT_' + syncCalId + '|' + evtId,
+              Timestamp: extEvt.getDateCreated() ? extEvt.getDateCreated().toISOString() : new Date().toISOString(),
+              Phone: 'EXTERNAL',
+              Name: extEvt.getTitle() || '(No Title)',
+              Department: calName,
+              LeaveType: 'External Event',
+              StartDate: sDate.toISOString(),
+              EndDate: eDate.toISOString(),
+              HalfDay: 'NONE',
+              CoveringPerson: '',
+              Country: '',
+              State: '',
+              Remarks: extEvt.getDescription() || '',
+              Status: 'External (GCal)',
+              EventIDs: syncCalId + '|' + evtId,
+              Location: extEvt.getLocation() || '',
+              Attendees: '[]',
+              InfoAll: 'FALSE',
+              IsAllDay: isAllDay ? 'TRUE' : 'FALSE',
+              UntilDate: '',
+              LocationDetails: '',
+              _isExternal: true
+          });
+      });
+  }
+} catch(errSync) {
+  console.error("Error syncing specific external calendar", errSync);
+}
+});
+}
+putCachedData("external_gcal_events_cache", result, 21600); // Pre-computed JSON payload cached for 6 hours
+return result;
+}
+
+function INITIAL_SETUP() {
+try {
+People.ContactGroups.list({ pageSize: 1 });
+People.People.Connections.list('people/me', { pageSize: 1, personFields: 'names' });
+CalendarApp.getAllCalendars();
+MailApp.getRemainingDailyQuota();
+DriveApp.getFiles(1);
+DocumentApp.create('dummy'); 
+} catch(e) {}
+
+var props = PropertiesService.getScriptProperties();
+if (!props.getProperty('adminPassword')) props.setProperty('adminPassword', 'P@ssw0rd');
+if (!props.getProperty('kahLimit')) props.setProperty('kahLimit', '50');
+if (!props.getProperty('approvingAuthority')) props.setProperty('approvingAuthority', Session.getActiveUser().getEmail());
+if (!props.getProperty('menuOrder')) props.setProperty('menuOrder', JSON.stringify(['dashboard', 'parade-state', 'my-leaves', 'submit-combined']));
+if (!props.getProperty('landingPage')) props.setProperty('landingPage', 'dashboard');
+if (!props.getProperty('dashboardDeptOrder')) props.setProperty('dashboardDeptOrder', JSON.stringify([]));
+if (!props.getProperty('adminSectionsOrder')) props.setProperty('adminSectionsOrder', JSON.stringify(['landing-page', 'app-mode', 'dashboard-filter-order', 'admin-pass', 'user-keyword', 'external-booking', 'gcal-sync', 'menu-order']));
+if (!props.getProperty('adminContactsSectionsOrder')) props.setProperty('adminContactsSectionsOrder', JSON.stringify(['contact-format', 'register-user', 'manage-users']));
+if (!props.getProperty('externalToken')) props.setProperty('externalToken', Utilities.getUuid());
+if (!props.getProperty('gcalSyncCalendars')) props.setProperty('gcalSyncCalendars', JSON.stringify([]));
+
+var typicalEventTypes = props.getProperty('typicalEventTypes');
+if (!typicalEventTypes) {
+var defaultTypes =[
+{name: 'Generic', isEvent: true, defaultLoc: 'In Camp', isKahRelevant: false, fields: { location:{show:true, req:true}, locationDetails:{show:true,req:false}, attendees:{show:true,req:false}, remarks:{show:true,req:true,label:'Meeting Description'} }, fieldOrder: ['time', 'location', 'attendees', 'remarks', 'repeat', 'overseas']},
+{name: 'Others', isEvent: true, defaultLoc: 'Out of Camp', isKahRelevant: false, fields: { location:{show:true, req:true}, locationDetails:{show:true,req:false}, attendees:{show:true,req:false}, remarks:{show:true,req:false,label:'Remarks'} }, fieldOrder: ['time', 'location', 'attendees', 'remarks', 'repeat', 'overseas']},
+{name: 'Official Trip', isEvent: false, isKahRelevant: true, fields: { location:{show:false, req:false}, locationDetails:{show:false,req:false}, attendees:{show:true,req:false}, remarks:{show:true,req:false,label:'Remarks'} }, fieldOrder: ['overseas', 'time', 'remarks', 'attendees', 'location', 'repeat']},
+{name: 'Overseas Leave', isEvent: false, isKahRelevant: true, fields: { location:{show:false, req:false}, locationDetails:{show:false,req:false}, attendees:{show:false,req:false}, remarks:{show:true,req:false,label:'Remarks'} }, fieldOrder: ['overseas', 'time', 'remarks', 'attendees', 'location', 'repeat']},
+{name: 'Local Leave', isEvent: false, isKahRelevant: false, fields: { location:{show:false, req:false}, locationDetails:{show:false,req:false}, attendees:{show:false,req:false}, remarks:{show:true,req:false,label:'Remarks'} }, fieldOrder: ['time', 'remarks', 'attendees', 'location', 'repeat', 'overseas']}
+];
+props.setProperty('typicalEventTypes', JSON.stringify(defaultTypes));
+} else {
+var existing = JSON.parse(typicalEventTypes);
+var updated = false;
+existing.forEach(function(t) {
+if (t.name === 'Meeting') { t.name = 'Generic'; updated = true; }
+if (t.defaultLoc === 'Office') { t.defaultLoc = 'In Camp'; updated = true; }
+if (t.defaultLoc === 'Others') { t.defaultLoc = 'Out of Camp'; updated = true; }
+if (!t.fields) {
+t.fields = {
+ location: {show: t.isEvent, req: t.isEvent},
+ locationDetails: {show: t.isEvent, req: false},
+ attendees: {show: t.isEvent || t.name === 'Official Trip', req: false},
+ remarks: {show: true, req: t.name==='Generic', label: t.name==='Generic'?'Meeting Description':'Remarks'}
+};
+updated = true;
+}
+if (!t.fieldOrder) {
+if (t.name === 'Official Trip' || t.name === 'Overseas Leave') {
+ t.fieldOrder = ['overseas', 'time', 'remarks', 'attendees', 'location', 'repeat'];
+} else {
+ t.fieldOrder = ['time', 'location', 'attendees', 'remarks', 'repeat', 'overseas'];
+}
+updated = true;
+}
+if (typeof t.isKahRelevant === 'undefined') {
+t.isKahRelevant = (t.name === 'Official Trip' || t.name === 'Overseas Leave');
+updated = true;
+}
+});
+if (updated) props.setProperty('typicalEventTypes', JSON.stringify(existing));
+}
+
+if (!props.getProperty('kahEmailSubject')) props.setProperty('kahEmailSubject', 'Leave Requires Approval: KAH Limit Crossed for {Unit}');
+if (!props.getProperty('kahEmailBody')) props.setProperty('kahEmailBody', 'User {Name} applied for {EventType} but KAH limit was crossed for {Unit}.');
+
+if (!props.getProperty('gcalTemplate')) props.setProperty('gcalTemplate', '{EventType} - {Name}, {Attendees}');
+if (props.getProperty('agendaTemplate') === null) props.setProperty('agendaTemplate', '{EventType} - {Name} ({Department})');
+if (props.getProperty('agendaDetailsTemplate') === null) props.setProperty('agendaDetailsTemplate', 'Start: {StartTime}\nEnd: {EndTime}\nLocation: {Location}\nAttendees: {Attendees}\nEvent Description: {EventDescription}');
+if (props.getProperty('infoAllTemplate') === null) props.setProperty('infoAllTemplate', '{EventType} - {Name} ({Department})');
+if (props.getProperty('infoAllDetailsTemplate') === null) props.setProperty('infoAllDetailsTemplate', 'Start: {StartTime}\nEnd: {EndTime}\nLocation: {Location}\nEvent Description: {EventDescription}');
+if (!props.getProperty('contactNameFormat')) props.setProperty('contactNameFormat', '{Name} (Cloud Group : {Unit})');
+
+if (!props.getProperty('acronyms')) props.setProperty('acronyms', JSON.stringify({}));
+if (!props.getProperty('customKahGroups')) props.setProperty('customKahGroups', JSON.stringify([]));
+
+if (!props.getProperty('userKeyword')) props.setProperty('userKeyword', 'peace');
+if (!props.getProperty('appMode')) props.setProperty('appMode', 'combined');
+if (!props.getProperty('companyStructure')) props.setProperty('companyStructure', JSON.stringify({}));
+
+var dbId = props.getProperty('dbSheetId');
+if (!dbId) {
+var ss = SpreadsheetApp.create("Company_Leaves_DB");
+var sheet = ss.getActiveSheet();
+sheet.setName("Leaves");
+sheet.appendRow(['ID', 'Timestamp', 'Phone', 'Name', 'Department', 'LeaveType', 'StartDate', 'EndDate', 'HalfDay', 'CoveringPerson', 'Country', 'State', 'Remarks', 'Status', 'EventIDs', 'Location', 'Attendees', 'InfoAll', 'IsAllDay', 'UntilDate', 'LocationDetails']);
+props.setProperty('dbSheetId', ss.getId());
+} else {
+var ss = SpreadsheetApp.openById(dbId);
+var mainSheet = ss.getSheetByName("Leaves") || ss.getSheets()[0];
+verifySchema(mainSheet);
+}
+
+try {
+var cmr = CalendarApp.getCalendarsByName("Cloud Meeting Room");
+if (cmr.length === 0) CalendarApp.createCalendar("Cloud Meeting Room");
+} catch(e) {}
+
+try { ensureGcalSyncTrigger(); } catch(e) {}
+}
+
+function verifySchema(sheet) {
+var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+if (headers.indexOf('Location') === -1) { sheet.getRange(1, headers.length + 1).setValue('Location'); headers.push('Location'); }
+if (headers.indexOf('Attendees') === -1) { sheet.getRange(1, headers.length + 1).setValue('Attendees'); headers.push('Attendees'); }
+if (headers.indexOf('InfoAll') === -1) { sheet.getRange(1, headers.length + 1).setValue('InfoAll'); headers.push('InfoAll'); }
+if (headers.indexOf('IsAllDay') === -1) { sheet.getRange(1, headers.length + 1).setValue('IsAllDay'); headers.push('IsAllDay'); }
+if (headers.indexOf('UntilDate') === -1) { sheet.getRange(1, headers.length + 1).setValue('UntilDate'); headers.push('UntilDate'); }
+if (headers.indexOf('LocationDetails') === -1) { sheet.getRange(1, headers.length + 1).setValue('LocationDetails'); headers.push('LocationDetails'); }
+return headers;
+}
+
+function applyAcronyms(text, acronymsObj) {
+if (!text || !acronymsObj) return text;
+var result = text;
+
+var acronymKeys = Object.keys(acronymsObj);
+
+acronymKeys.sort(function(a, b) {
+var fullA = typeof acronymsObj[a] === 'object' ? (acronymsObj[a].full || "") : (acronymsObj[a] || "");
+var fullB = typeof acronymsObj[b] === 'object' ? (acronymsObj[b].full || "") : (acronymsObj[b] || "");
+return fullB.length - fullA.length;
+});
+
+for (var i = 0; i < acronymKeys.length; i++) {
+var key = acronymKeys[i];
+if (!key) continue;
+var val = acronymsObj[key];
+var full = typeof val === 'object' ? val.full : val;
+var active = typeof val === 'object' ? val.active : true; 
+
+if (!active || !full) continue;
+
+var escapedFull = full.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+var prefix = /^[\w\u00C0-\u017F]/.test(full) ? "\\b" : "";
+var suffix = /[\w\u00C0-\u017F]$/.test(full) ? "\\b" : "";
+
+var regex = new RegExp(prefix + escapedFull + suffix, "gi");
+result = result.replace(regex, key);
+}
+return result;
+}
+
+function getExternalData(data) {
+var cacheKey = "external_data_cache";
+var cached = getCachedData(cacheKey);
+if (cached) return cached;
+
+var lock = LockService.getScriptLock();
+lock.waitLock(15000);
+try {
+cached = getCachedData(cacheKey);
+if (cached) return cached;
+
+var props = PropertiesService.getScriptProperties();
+if (data.extToken !== props.getProperty('externalToken')) throw new Error("Invalid or revoked external link.");
+
+var cg = getContactsAndGroups();
+var allContacts = [];
+var format = getContactNameFormat();
+
+cg.connections.forEach(function(person) {
+var phone = (person.phoneNumbers && person.phoneNumbers.length > 0) ? person.phoneNumbers[0].value.replace(/\D/g, '').slice(-8) : "";
+if (phone && person.names && person.names.length > 0) {
+var name = extractName(person.names[0].displayName, format);
+if (person.memberships) {
+var depts = [];
+person.memberships.forEach(function(m) {
+    if (m.contactGroupMembership && m.contactGroupMembership.contactGroupResourceName) {
+        var gName = cg.groupMap[m.contactGroupMembership.contactGroupResourceName];
+        if (gName) depts.push(gName);
+    }
+});
+if (depts.length > 0) {
+    var deptsStr = depts.join(',');
+    allContacts.push({ name: name, phone: phone, dept: deptsStr });
+}
+}
+}
+});
+
+var result = {
+typicalEventTypes: JSON.parse(props.getProperty('typicalEventTypes') || "[]"),
+acronyms: JSON.parse(props.getProperty('acronyms') || "{}"),
+companyContacts: allContacts,
+customKahGroups: JSON.parse(props.getProperty('customKahGroups') || "[]"),
+contactNameFormat: format
+};
+
+putCachedData(cacheKey, result, 1800);
+return result;
+} finally {
+lock.releaseLock();
+}
+}
+
+function submitExternalEvent(data) {
+var props = PropertiesService.getScriptProperties();
+if (data.extToken !== props.getProperty('externalToken')) throw new Error("Invalid or revoked external link.");
+
+data.leaveType = 'Generic'; // Force to generic
+data._userRole = 'admin'; // Bypass phone security check in submitLeave
+data._userPhone = 'EXTERNAL'; // For logging safety
+
+return submitLeave(data);
+}
+
+function doPost(e) {
+var lock = LockService.getScriptLock();
+var payload = JSON.parse(e.postData.contents);
+var action = payload.action;
+
+var needsLock =['submitLeave', 'editLeave', 'cancelLeave', 'registerUser', 'updateUser', 'deleteUser', 'updateUserUnits', 'saveSettings', 'renameUnit', 'forceSyncContacts', 'backfillCustomCalendar', 'addCalendarAcl', 'removeCalendarAcl', 'updateCalendarAcl', 'deleteCalendar', 'submitExternalEvent', 'regenerateExternalToken', 'forceSyncExternalCals'].indexOf(action) !== -1;
+if (needsLock) {
+var lockSuccess = lock.tryLock(28000); 
+if (!lockSuccess) {
+ return ContentService.createTextOutput(JSON.stringify({ success: false, error: "System busy processing high volume of requests. Please wait a moment and try again." })).setMimeType(ContentService.MimeType.JSON);
+}
+}
+
+try {
+var data = payload.data || {};
+var credentials = payload.credentials || {};
+var responseData = {};
+
+var secureActions =['getSettings', 'saveSettings', 'submitLeave', 'editLeave', 'cancelLeave', 'getLeaves', 'updateUser', 'deleteUser', 'updateUserUnits', 'renameUnit', 'forceSyncContacts', 'deleteCalendar', 'backfillCustomCalendar', 'getInitialData', 'getCalendarAcls', 'addCalendarAcl', 'removeCalendarAcl', 'updateCalendarAcl', 'regenerateExternalToken', 'forceSyncExternalCals'];
+if (secureActions.indexOf(action) !== -1) {
+if (!credentials.pass && !data.adminPass) throw new Error("Unauthorized: Missing credentials");
+
+var checkPass = data.adminPass || credentials.pass;
+var verifiedUser = handleLogin({ password: checkPass });
+
+if (verifiedUser.role !== 'admin' && String(verifiedUser.phone) !== String(credentials.phone)) {
+throw new Error("Unauthorized: Invalid credentials");
+}
+
+data._userRole = verifiedUser.role;
+data._userPhone = verifiedUser.phone;
+}
+
+if (action === 'login') responseData = handleLogin(data);
+else if (action === 'getExternalData') responseData = getExternalData(data);
+else if (action === 'submitExternalEvent') responseData = submitExternalEvent(data);
+else if (action === 'getSettings') responseData = getSettings(data);
+else if (action === 'saveSettings') responseData = saveSettings(data);
+else if (action === 'submitLeave') responseData = submitLeave(data);
+else if (action === 'editLeave') responseData = editLeave(data);
+else if (action === 'getLeaves') responseData = getLeaves(data);
+else if (action === 'cancelLeave') responseData = cancelLeave(data);
+else if (action === 'registerUser') responseData = registerUser(data);
+else if (action === 'updateUser') responseData = updateUser(data);
+else if (action === 'deleteUser') responseData = deleteUser(data);
+else if (action === 'updateUserUnits') responseData = updateUserUnits(data);
+else if (action === 'renameUnit') responseData = renameUnit(data);
+else if (action === 'forceSyncContacts') responseData = forceSyncContacts(data);
+else if (action === 'deleteCalendar') responseData = deleteCalendar(data);
+else if (action === 'backfillCustomCalendar') responseData = backfillCustomCalendar(data);
+else if (action === 'getCalendarAcls') responseData = getCalendarAcls(data);
+else if (action === 'addCalendarAcl') responseData = addCalendarAcl(data);
+else if (action === 'removeCalendarAcl') responseData = removeCalendarAcl(data);
+else if (action === 'updateCalendarAcl') responseData = updateCalendarAcl(data);
+else if (action === 'regenerateExternalToken') responseData = regenerateExternalToken(data);
+else if (action === 'forceSyncExternalCals') {
+syncExternalCalendars();
+removeCachedData("leaves_cache");
+responseData = { success: true };
+}
+else if (action === 'getInitialData') responseData = { settings: getSettings(data), leaves: getLeaves(data) };
+
+return ContentService.createTextOutput(JSON.stringify({ success: true, data: responseData })).setMimeType(ContentService.MimeType.JSON);
+} catch (err) {
+return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.message })).setMimeType(ContentService.MimeType.JSON);
+} finally {
+if (needsLock) lock.releaseLock();
+}
+}
+
+function doOptions(e) { 
+return ContentService.createTextOutput("").setMimeType(ContentService.MimeType.JSON); 
+}

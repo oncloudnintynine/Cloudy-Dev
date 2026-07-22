@@ -1,0 +1,75 @@
+// ==========================================
+// Global State & Constants
+// ==========================================
+
+let user = JSON.parse(localStorage.getItem('user')) || null;
+let allLeaves =[];
+let currentEditId = null;
+let lastLocalChange = 0; // Concurrency timestamp tracker
+
+let companyContacts =[];
+let validContactNames =[];
+let fuseAllContacts = null;
+let fuseAttendees = null;
+
+let tempTypicalEventTypes =[];
+let tempAcronyms = {};
+let customKahGroups =[];
+let tempMenuOrder =[];
+let tempAdminSectionsOrder =[];
+let tempAdminContactsSectionsOrder =[];
+let tempDashboardDeptOrder =[];
+let eventAttendees =[]; 
+let isInfoAll = false;
+
+let appMode = 'combined'; 
+let companyStructure =[]; 
+let pendingStructureChanges = {}; 
+let adminBehalfUser = null; 
+
+let dashViewMode = 'agenda'; 
+
+let appData = {
+leave: { startD: new Date(), endD: new Date(), startAMPM: 'AM', endAMPM: 'PM' },
+event: { startD: new Date(), endD: new Date(), untilD: new Date(), isAllDay: false },
+combined: { startD: new Date(), endD: new Date(), untilD: new Date(), startAMPM: 'AM', endAMPM: 'PM', isAllDay: false },
+parade: { targetD: new Date() },
+register: { birthdayD: new Date(2000, 0, 1), birthdaySelected: false },
+adminRegister: { birthdayD: new Date(2000, 0, 1), birthdaySelected: false },
+manageUser: { birthdayD: new Date(2000, 0, 1), birthdaySelected: false }
+};
+
+let dashDate = new Date(); dashDate.setHours(0,0,0,0);
+let myDate = new Date(); myDate.setHours(0,0,0,0);
+let dashMonth = new Date(dashDate.getFullYear(), dashDate.getMonth(), 1);
+let myMonth = new Date(myDate.getFullYear(), myDate.getMonth(), 1);
+
+const mos =['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+const TAB_NAMES = {
+'index': 'Dashboard',
+'parade': 'Parade State',
+'my-leaves': 'My Calendar',
+'submit-leave': 'Add Leave/MC/OIL (Classic)',
+'submit-event': 'Add Event (Classic)',
+'submit-combined': 'Add Event / Leave',
+'admin': 'General Settings',
+'admin-contacts': 'Contacts & Users Management',
+'kah-management': 'KAH Management',
+'admin-structure': 'Organisational Structure',
+'admin-event-templates': 'Event Types & Templates',
+'admin-acronyms': 'Acronyms / Shortforms',
+'admin-gcal-access': 'Google Calendar Access Rights'
+};
+
+const DEFAULT_MENU =['dashboard', 'parade-state', 'my-leaves', 'submit-combined'];
+
+// --- DEBOUNCER HELPER FOR SEARCH ---
+function debounce(func, wait) {
+let timeout;
+return function(...args) {
+const context = this;
+clearTimeout(timeout);
+timeout = setTimeout(() => func.apply(context, args), wait);
+};
+}
